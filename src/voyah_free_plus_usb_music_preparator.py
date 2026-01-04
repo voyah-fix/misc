@@ -100,7 +100,7 @@ except Exception as e:
 
 @dataclass
 class InferredTags:
-    """Tags inferred from path/filename. Values may be None if inference failed."""
+    # Tags inferred from path/filename. Values may be None if inference failed.
     artist: Optional[str] = None
     album: Optional[str] = None
     title: Optional[str] = None

@@ -263,7 +263,7 @@ def run_live(cmd: list[str], check: bool = True, ctx: dict | None = None, durati
     saw_any_progress = False
 
     def maybe_print(force: bool = False) -> None:
-        """Throttle printing so logs remain readable."""
+        # Throttle printing so logs remain readable.
         nonlocal last_print_ts, last_printed_pct, file_pct, out_time_s
         now = time.time()
         if not force and (now - last_print_ts) < min_interval:
