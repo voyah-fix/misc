@@ -39,7 +39,7 @@ from pathlib import Path
 # =============================================================================
 
 # Directory that currently contains the flat list of MP4 files:
-SOURCE_DIR = Path(r"D:/DRV_FLAT")
+SOURCE_DIR = Path(r"D:/DRV_FLAT_VIDEOS")
 
 # If True: do not move anything, only print actions.
 DRY_RUN = False
