@@ -32,11 +32,11 @@ from pathlib import Path
 # SETTINGS
 # =============================================================================
 
-ROOT_DIR = Path(r"D:/DVR_INPUT")          # <-- where your timestamp folders live
-OUT_DIR = Path(r"D:/DVR_OUTPUT_FRONT")    # <-- where outputs will be written
+ROOT_DIR = Path(r"D:/IN")  # <-- where your timestamp folders live
+OUT_DIR = Path(r"D:/OUT")  # <-- where outputs will be written
 
-FFMPEG = "ffmpeg"      # e.g. r"C:\Tools\ffmpeg\bin\ffmpeg.exe"
-FFPROBE = "ffprobe"    # e.g. r"C:\Tools\ffmpeg\bin\ffprobe.exe"
+FFMPEG = "ffmpeg"  # e.g. r"C:\Tools\ffmpeg\bin\ffmpeg.exe"
+FFPROBE = "ffprobe"  # e.g. r"C:\Tools\ffmpeg\bin\ffprobe.exe"
 
 VERBOSE = True
 SHOW_FFMPEG_CMD = True
@@ -89,6 +89,34 @@ NON_TTY_MIN_PCT_STEP = 3.0
 # =============================================================================
 # Helpers
 # =============================================================================
+
+
+def ffprobe_is_readable(path: Path) -> bool:
+    cmd = [FFPROBE, "-v", "error", "-show_format", "-show_streams", str(path)]
+    p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    return p.returncode == 0
+
+
+def remux_mp4_copy(in_path: Path, out_path: Path) -> bool:
+    """
+    Attempt to fix container issues by stream-copy remuxing.
+    Returns True if out_path was created successfully.
+    """
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    cmd = [
+        FFMPEG, "-y",
+        "-hide_banner",
+        "-loglevel", "error",
+        "-i", str(in_path),
+        "-map", "0",
+        "-c", "copy",
+        "-movflags", "+faststart",
+        str(out_path),
+    ]
+    p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    return p.returncode == 0 and out_path.exists() and out_path.stat().st_size > 0
+
 
 def log(msg: str) -> None:
     if VERBOSE:
@@ -478,6 +506,21 @@ def build_segment_front(
       - encode H.264 + AAC
     """
 
+    # sanity check: readable?
+    if not ffprobe_is_readable(front_file):
+        print(f"[WARN] Unreadable MP4 (ffprobe failed), will try remux: {front_file}", flush=True)
+
+        # Put fixed files next to your work segments (keeps input clean)
+        fixed_dir = out_seg.parent / "_fixed_inputs"
+        fixed_file = fixed_dir / front_file.name
+
+        if remux_mp4_copy(front_file, fixed_file) and ffprobe_is_readable(fixed_file):
+            print(f"[INFO] Remux OK, using fixed input: {fixed_file}", flush=True)
+            front_file = fixed_file
+        else:
+            print(f"[SKIP] Could not remux/repair: {front_file}", flush=True)
+            return
+
     has_audio = ffprobe_has_audio(front_file)
 
     # Progress estimation
@@ -537,7 +580,7 @@ def build_segment_front(
         "-crf", str(CRF),
         "-pix_fmt", "yuv420p",
         "-profile:v", "high",
-        "-level:v", "4.2",   # plenty for 1920x910@30
+        "-level:v", "4.2",  # plenty for 1920x910@30
         "-c:a", "aac",
         "-b:a", "160k",
         str(out_seg),

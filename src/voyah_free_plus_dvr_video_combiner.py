@@ -63,8 +63,13 @@ from pathlib import Path
 # =============================================================================
 
 # Change to your real DVR input folder and output folder.
-ROOT_DIR = Path(r"D:/DVR_INPUT")         # <-- where your timestamp folders live
-OUT_DIR = Path(r"D:/DVR_OUTPUT_MERGED")  # <-- where merged outputs will be written
+ROOT_DIR = Path(r"D:/IN")  # <-- where your timestamp folders live
+OUT_DIR = Path(r"D:/OUT")  # <-- where merged outputs will be written
+
+# Repair / robustness
+TRY_REMUX_BROKEN_INPUTS = True
+FIXED_INPUTS_SUBDIR = "_fixed_inputs"   # created under each per-date work_dir
+SKIP_SEGMENT_IF_ANY_CAM_UNREADABLE = True
 
 # If ffmpeg/ffprobe are not in PATH, provide full paths here.
 FFMPEG = "ffmpeg"  # e.g. r"C:\Tools\ffmpeg\bin\ffmpeg.exe"
@@ -134,6 +139,72 @@ NON_TTY_MIN_PCT_STEP = 3.0  # print only if progress advanced by >= this many % 
 # =============================================================================
 # Helpers
 # =============================================================================
+
+
+def ffprobe_is_readable(path: Path) -> bool:
+    """
+    True if ffprobe can parse container + streams.
+    This catches truncated/broken MP4s early.
+    """
+    cmd = [
+        FFPROBE, "-v", "error",
+        "-show_format",
+        "-show_streams",
+        str(path),
+    ]
+    p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    return p.returncode == 0
+
+
+def remux_mp4_copy(in_path: Path, out_path: Path) -> bool:
+    """
+    Attempt to fix container issues by stream-copy remuxing.
+    Returns True if out_path was created successfully.
+    """
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    cmd = [
+        FFMPEG, "-y",
+        "-hide_banner",
+        "-loglevel", "error",
+        "-i", str(in_path),
+        "-map", "0",
+        "-c", "copy",
+        "-movflags", "+faststart",
+        str(out_path),
+    ]
+    p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    return p.returncode == 0 and out_path.exists() and out_path.stat().st_size > 0
+
+
+def ensure_readable_or_fixed(
+    src: Path,
+    fixed_dir: Path,
+    label: str,
+) -> Path | None:
+    """
+    Returns a usable Path:
+      - src if readable
+      - remuxed copy if readable after fix
+      - None if cannot be made readable
+    """
+    if ffprobe_is_readable(src):
+        return src
+
+    print(f"[WARN] Unreadable MP4 ({label}), ffprobe failed: {src}", flush=True)
+
+    if not TRY_REMUX_BROKEN_INPUTS:
+        return None
+
+    fixed_path = fixed_dir / src.name
+    ok = remux_mp4_copy(src, fixed_path)
+    if ok and ffprobe_is_readable(fixed_path):
+        print(f"[INFO] Remux OK ({label}), using fixed input: {fixed_path}", flush=True)
+        return fixed_path
+
+    print(f"[SKIP] Could not remux/repair ({label}): {src}", flush=True)
+    return None
+
 
 def log(msg: str) -> None:
     # Print only when VERBOSE is enabled.
@@ -613,6 +684,7 @@ def build_segment_4k(
         folder: Path,
         cams: dict[str, Path],
         out_seg: Path,
+        work_dir: Path,
         date_s: str,
         date_idx: int,
         date_total: int,
@@ -633,6 +705,37 @@ def build_segment_4k(
     # Audio pipeline:
     #   - If at least one camera has audio: map that stream
     #   - Else: generate silent stereo audio of segment duration
+
+
+    # --- Validate/repair inputs (avoid crashing on corrupted segments) ---
+    fixed_dir = work_dir / FIXED_INPUTS_SUBDIR / folder.name
+    fixed_dir.mkdir(parents=True, exist_ok=True)
+
+    # Ensure all 4 cams readable (or repaired)
+    fixed: dict[str, Path] = {}
+    for cam in ["front", "back", "left", "right"]:
+        p = cams.get(cam)
+        if not p:
+            # Shouldn't happen here because caller filters completeness,
+            # but keep it safe.
+            print(f"[SKIP] Missing camera '{cam}' in {folder}", flush=True)
+            return
+
+        usable = ensure_readable_or_fixed(p, fixed_dir, label=f"{folder.name}/{cam}")
+        if usable is None:
+            if SKIP_SEGMENT_IF_ANY_CAM_UNREADABLE:
+                print(f"[SKIP] Segment {folder.name} skipped due to unreadable '{cam}'", flush=True)
+                return
+            else:
+                # If you ever want "best-effort" behavior, you'd need
+                # a different merge strategy. For now, segment is skipped.
+                return
+
+        fixed[cam] = usable
+
+    # Replace cams paths with the usable ones
+    cams = fixed
+
 
     audio_cam = pick_audio_camera_for_segment(cams)
 
@@ -825,12 +928,14 @@ def main() -> None:
                 folder=folder,
                 cams=cams,
                 out_seg=out_seg,
+                work_dir=work_dir,
                 date_s=date_s,
                 date_idx=date_idx,
                 date_total=date_total,
                 seg_idx=seg_idx,
                 seg_total=seg_total,
             )
+
             built += 1
             segment_files.append(out_seg)
 
